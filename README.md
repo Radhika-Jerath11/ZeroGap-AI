@@ -22,5 +22,27 @@ The model has been validated against three core scenarios:
 - **Case 2 (Standard):** ~85% Efficiency for suburban social gatherings.
 - **Case 3 (High Risk):** Detects critical surplus and spoilage risks in large-scale events.
 
+
+
+## 🚀 Quick Start: How to Run the App
+
+If you want to run this project locally on your machine, follow these steps:
+
+### 1. Clone the Repository
+```bash
+git clone
+
+python -m venv venv
+# For Windows:
+venv\Scripts\activate
+# For Mac/Linux:
+source venv/bin/activate
+
+pip install -r requirements.txt
+
+streamlit run app.py
+
+
+```
 ---
 *Developed to make Zero-Waste catering a reality.*
