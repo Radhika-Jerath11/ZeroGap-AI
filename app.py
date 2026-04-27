@@ -470,6 +470,12 @@ with right:
             df[num_cols] = scaler.transform(df[num_cols])
             prediction = model.predict(df)[0]
 
+            # --- NEW SHORTAGE GUARDRAIL ---
+            # If food is less than 10% of the guest count, it's a shortage, not waste.
+            if food < (guests * 0.1):
+                prediction = 0
+                st.error("🚨 **CRITICAL SHORTAGE:** You have almost no food for these guests! Waste is 0%, but your event is at risk.")
+
             # ── 💡 SMART LOGIC GUARDRAIL ──
             if food_per_guest > 1.5:
                 adjustment = (food_per_guest - 1.5) * (guests * 0.4)
