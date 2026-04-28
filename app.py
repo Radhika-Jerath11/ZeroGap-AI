@@ -461,11 +461,8 @@ with right:
             data[f"Preparation Method_{prep}"] = 1
             data[f"Geographical Location_{location}"] = 1
 
-            # 4. Run the ML model
-            df = pd.DataFrame([data])[model_features]
-            num_cols = ['Number of Guests', 'Quantity of Food', 'food_per_guest']
-            df[num_cols] = scaler.transform(df[num_cols])
-            prediction = model.predict(df)[0]
+            # Note: prediction is fully derived from ratio-based logic below
+            prediction = 0  # placeholder, overwritten by ratio logic
 
             # ── RATIO-BASED PREDICTION + COMPONENT ADJUSTMENTS ───────────────
             shortage_alert = None
