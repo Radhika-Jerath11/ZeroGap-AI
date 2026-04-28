@@ -426,37 +426,34 @@ with right:
         if not model_loaded:
             st.error("Model files (model.pkl / scaler.pkl) not found. Place them in the app directory.")
         else:
-            # 1. Calculate math FIRST so we can use it in the dictionary
+            # 1. Calculate ratio FIRST — this is our key signal
             food_per_guest = food / guests
-            
-            # 2. Build the data dictionary
-            data = {
-                'Number of Guests': guests,
-                'Quantity of Food': food,
-                'Pricing': pricing,
-                'User Rating': rating,
-                'food_per_guest': food_per_guest,
-                'event_month': month,
-                'event_day': day,
-                'Type of Food_dairy products': 0,
-                'Type of Food_fruits': 0,
-                'Type of Food_meat': 0,
-                'Type of Food_vegetables': 0,
-                'Event Type_corporate': 0,
-                'Event Type_social gathering': 0,
-                'Event Type_wedding': 0,
-                'Storage Conditions_refrigerated': 0,
-                'Storage Conditions_room temperature': 0,
-                'Purchase History_regular': 1,
-                'Seasonality_summer': 0,
-                'Seasonality_winter': 0,
-                'Preparation Method_finger food': 0,
-                'Preparation Method_sit-down dinner': 0,
-                'Geographical Location_suburban': 0,
-                'Geographical Location_urban': 0,
-            }
-            
-            # 3. Set categorical flags (Crucial for the model to work!)
+
+            # 2. Build the feature dictionary in the EXACT order the model expects
+            model_features = [
+                'Number of Guests', 'Quantity of Food', 'Pricing', 'User Rating',
+                'event_month', 'event_day', 'food_per_guest',
+                'Type of Food_dairy products', 'Type of Food_fruits',
+                'Type of Food_meat', 'Type of Food_vegetables',
+                'Event Type_corporate', 'Event Type_social gathering', 'Event Type_wedding',
+                'Storage Conditions_refrigerated', 'Storage Conditions_room temperature',
+                'Purchase History_regular',
+                'Seasonality_summer', 'Seasonality_winter',
+                'Preparation Method_finger food', 'Preparation Method_sit-down dinner',
+                'Geographical Location_suburban', 'Geographical Location_urban',
+            ]
+
+            data = {k: 0 for k in model_features}
+            data['Number of Guests'] = guests
+            data['Quantity of Food'] = food
+            data['Pricing'] = pricing
+            data['User Rating'] = rating
+            data['food_per_guest'] = food_per_guest
+            data['event_month'] = month
+            data['event_day'] = day
+            data['Purchase History_regular'] = 1
+
+            # 3. Set categorical flags
             data[f"Type of Food_{food_type}"] = 1
             data[f"Event Type_{event_type}"] = 1
             data[f"Storage Conditions_{storage}"] = 1
@@ -464,53 +461,123 @@ with right:
             data[f"Preparation Method_{prep}"] = 1
             data[f"Geographical Location_{location}"] = 1
 
-            # 4. Run the actual ML Model
-            df = pd.DataFrame([data])
+            # 4. Run the ML model
+            df = pd.DataFrame([data])[model_features]
             num_cols = ['Number of Guests', 'Quantity of Food', 'food_per_guest']
             df[num_cols] = scaler.transform(df[num_cols])
             prediction = model.predict(df)[0]
 
-            # --- NEW SHORTAGE GUARDRAIL ---
-            # If food is less than 10% of the guest count, it's a shortage, not waste.
-            if food < (guests * 0.1):
+            # ── RATIO-BASED PREDICTION + COMPONENT ADJUSTMENTS ───────────────
+            shortage_alert = None
+
+            if food_per_guest < 0.5:
+                # Critical shortage — food runs out before all guests are served
                 prediction = 0
-                st.error("🚨 **CRITICAL SHORTAGE:** You have almost no food for these guests! Waste is 0%, but your event is at risk.")
+                waste_pct = 0.0
+                shortage_alert = "critical"
 
-            # ── 💡 SMART LOGIC GUARDRAIL ──
-            if food_per_guest > 1.5:
-                adjustment = (food_per_guest - 1.5) * (guests * 0.4)
-                prediction = prediction + adjustment
-            
-            prediction = min(prediction, food * 0.95)
-
-            # ── Status Classification ──
-            waste_pct = (prediction / food) * 100
-            
-            if waste_pct < 13:
-                level = "Low"
-                status_color = "#AFF2CA" 
-            elif waste_pct < 28:
-                level = "Medium" 
-                status_color = "#B2A16E" 
             else:
-                level = "High"
-                status_color = "#CA424D" 
+                # Step 1: Base waste% from food_per_guest ratio
+                if food_per_guest < 1.0:
+                    # Understocked — always Low regardless of component adjustments
+                    # Only flag warning if meaningfully understocked (< 0.75)
+                    waste_pct = 5.0 + (food_per_guest - 0.5) * 8.0
+                    if food_per_guest < 0.75:
+                        shortage_alert = "under"
+                elif food_per_guest < 1.2:
+                    # Near-balanced (10%–16%) — Low to Medium boundary
+                    waste_pct = 10.0 + (food_per_guest - 1.0) * 30.0
+                elif food_per_guest < 3.0:
+                    # Oversupplied (16%–52%)
+                    waste_pct = 16.0 + (food_per_guest - 1.2) * 20.0
+                else:
+                    # Heavily oversupplied, cap at 90%
+                    waste_pct = min(52.0 + (food_per_guest - 3.0) * 10.0, 90.0)
+
+                # Step 2: Apply component adjustments on top of base
+                # Food type — perishability affects waste
+                food_type_adj = {
+                    "meat": +3.0,
+                    "dairy products": +2.0,
+                    "vegetables": +1.5,
+                    "fruits": +1.0,
+                }
+                waste_pct += food_type_adj.get(food_type, 0)
+
+                # Storage — room temperature increases spoilage
+                if storage == "room temperature":
+                    waste_pct += 3.0 if season == "summer" else 1.5
+
+                # Preparation method — finger food generates more waste
+                if prep == "finger food":
+                    waste_pct += 2.0
+
+                # Event type — weddings tend to waste more than corporate
+                event_adj = {"wedding": +2.5, "social gathering": +1.0, "corporate": 0.0}
+                waste_pct += event_adj.get(event_type, 0)
+
+                # Pricing tier — premium events are better managed
+                pricing_adj = {1: +2.0, 2: 0.0, 3: -2.0}
+                waste_pct += pricing_adj.get(pricing, 0)
+
+                # User rating — higher rating = better managed event
+                waste_pct += (5 - rating) * 0.5  # rating 1→+2, rating 10→-2.5
+
+                # Clamp to valid range
+                # If understocked (fpg < 1.0), cap at 12.9% so it always stays Low
+                if food_per_guest < 1.0:
+                    waste_pct = max(0.0, min(waste_pct, 12.9))
+                else:
+                    waste_pct = max(0.0, min(waste_pct, 90.0))
+                prediction = (waste_pct / 100) * food
+
+            # Step 3: Classify level
+            if shortage_alert == "critical":
+                level, status_color = "Low", "#AFF2CA"
+            elif waste_pct < 13:
+                level, status_color = "Low", "#AFF2CA"
+            elif waste_pct < 28:
+                level, status_color = "Medium", "#B2A16E"
+            else:
+                level, status_color = "High", "#CA424D"
+
+            # Show shortage alerts
+            if shortage_alert == "critical":
+                st.markdown(f"""
+                <div style="background-color:#fde8e8; color:#000000; padding:15px; border-radius:10px; border-left:5px solid #e53e3e; margin-bottom:16px; font-size:0.85rem;">
+                    🚨 <strong style="color:#000000;">CRITICAL SHORTAGE:</strong> <span style="color:#000000;">Far too little food for these guests ({food_per_guest:.2f} units/guest). Food will run out immediately — waste is 0% because nothing is left over.</span>
+                </div>
+                """, unsafe_allow_html=True)
+            elif shortage_alert == "under":
+                st.markdown(f"""
+                <div style="background-color:#fff3cd; color:#000000; padding:15px; border-radius:10px; border-left:5px solid #ffc107; margin-bottom:16px; font-size:0.85rem;">
+                    ⚠️ <strong style="color:#000000;">UNDERSTOCKED:</strong> <span style="color:#000000;">Only {food_per_guest:.2f} units per guest — food may run short before all guests are served. Waste appears {level.lower()} because supply runs out, not because of good management.</span>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # ── High Surplus Warning ──────────────────────────────────────────
+            if waste_pct > 25:
+                st.markdown(f"""
+                <div style="background-color:#fff3cd; color:#000000; padding:15px; border-radius:10px; border-left:5px solid #ffc107; margin-bottom:16px; font-size:0.85rem;">
+                    ⚠️ <strong style="color:#000000;">High Surplus Alert:</strong> <span style="color:#000000;">You are providing {food_per_guest:.1f} units per guest. Consider reducing supply to optimise your ZeroGap score.</span>
+                </div>
+                """, unsafe_allow_html=True)
 
             required_food = max(0, food - prediction)
 
-# ── Result Hero (With Status Label) ──
+            # ── Result Hero ───────────────────────────────────────────────────
             st.markdown(f"""
             <div class="result-hero">
                 <div class="label">Predicted Wastage</div>
                 <div class="value">{prediction:.1f}</div>
                 <div class="unit">
-                    <span style="color:{status_color}; font-weight:bold; text-transform:uppercase;">{level} WASTAGE</span> 
+                    <span style="color:{status_color}; font-weight:bold; text-transform:uppercase;">{level} WASTAGE</span>
                     &nbsp;·&nbsp; {waste_pct:.1f}% of total supply
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
-            # ── Stat Tiles ──
+            # ── Stat Tiles ────────────────────────────────────────────────────
             t1, t2 = st.columns(2)
             with t1:
                 st.markdown(f"""
@@ -528,17 +595,10 @@ with right:
 
             st.markdown("<br>", unsafe_allow_html=True)
 
-            # ── High Surplus Warning (Black Text Inline CSS) ──
-            if waste_pct > 25:
-                st.markdown(f"""
-                <div style="background-color: #fff3cd; color: #000000; padding: 15px; border-radius: 10px; border-left: 5px solid #ffc107; margin-bottom: 20px; font-size: 0.85rem;">
-                    ⚠️ <strong>High Surplus Alert:</strong> You are providing {food_per_guest:.1f} units per guest. Consider reducing supply to optimize your ZeroGap score.
-                </div>
-                """, unsafe_allow_html=True)
-            # ── Suggested Distribution ──
+            # ── Suggested Distribution ────────────────────────────────────────
             st.markdown('<div class="section-label">Suggested Distribution</div>', unsafe_allow_html=True)
 
-            dist = {"Dairy Products": 0.20, "Fruits": 0.25, "Meat": 0.30, "Vegetables": 0.25}
+            dist  = {"Dairy Products": 0.20, "Fruits": 0.25, "Meat": 0.30, "Vegetables": 0.25}
             icons = {"Dairy Products": "🧀", "Fruits": "🍊", "Meat": "🥩", "Vegetables": "🥦"}
 
             for name, ratio in dist.items():
@@ -553,7 +613,7 @@ with right:
                 """, unsafe_allow_html=True)
 
     else:
-        # THIS ONLY SHOWS BEFORE YOU CLICK PREDICT
+        # Shown before prediction is run
         st.markdown("""
         <div class="empty-state">
             <div style="font-size:2.8rem; margin-bottom:1rem;">🌿</div>
@@ -567,6 +627,7 @@ with right:
             </div>
         </div>
         """, unsafe_allow_html=True)
+
 # ── Footer ─────────────────────────────────────────────────────────────────────
 st.markdown("""
 <p class="footnote">
